@@ -1,0 +1,12 @@
+# Entornos virtuales
+venv/
+env/
+
+# Base de datos (CRÍTICO para no dañar la US-D2)
+*.db
+focusflow.db
+*.sqlite3
+
+# Caché de Python
+__pycache__/
+*.pyc
