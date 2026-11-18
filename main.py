@@ -9,6 +9,7 @@ import models
 import schemas
 from database import Base, engine, get_db
 from explicacion import generar_explicacion
+from estimador import Estimador, estimar_contrato, actualizar_contrato
 
 Base.metadata.create_all(bind=engine)
 
@@ -103,25 +104,21 @@ def listar_bloques(dia: Optional[date] = Query(None), db: Session = Depends(get_
     return query.order_by(models.BloqueLibre.inicio).all()
 
 
-# ---------- Mocks del contrato (US-C1) ----------
+# ---------- Estimador real (US-A1 a US-A3, US-A7) + mock del planificador ----------
+
+# Estado del estimador en memoria. Aprende de cada tarea terminada vía el loop
+# del agente (US-C5). La persistencia a SQLite queda pendiente.
+estimador = Estimador()
+
 
 @app.post("/estimar", response_model=schemas.EstimarResponse)
 def estimar(payload: schemas.EstimarRequest):
-    return schemas.EstimarResponse(
-        duracion_esperada_min=142,
-        incertidumbre_min=38,
-        confianza="media",
-        n_observaciones=7,
-    )
+    return estimar_contrato(estimador, payload)
 
 
 @app.post("/estimador/actualizar", response_model=schemas.ActualizarEstimadorResponse)
 def actualizar_estimador(payload: schemas.ActualizarEstimadorRequest):
-    return schemas.ActualizarEstimadorResponse(
-        media_min=148,
-        incertidumbre_min=41,
-        n_observaciones=8,
-    )
+    return actualizar_contrato(estimador, payload)
 
 
 @app.post("/planificar", response_model=schemas.PlanificarResponse)

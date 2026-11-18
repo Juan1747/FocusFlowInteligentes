@@ -1,12 +1,30 @@
-# FocusFlow — Backend y agente
+# FocusFlow
 
-Backend del proyecto final de Introducción a los Sistemas Inteligentes (UNAL). FocusFlow es un planificador de tareas que aprende cuánto tardan de verdad las tareas del usuario y rehace la agenda cuando algo se demora.
+Proyecto final de Introducción a los Sistemas Inteligentes (UNAL). **FocusFlow** es un planificador de tareas que aprende cuánto tardan de verdad las tareas del usuario, arma la agenda respetando bloques libres, plazos y descansos, y la rehace automáticamente cuando algo se demora, explicando en una frase qué cambió y por qué.
 
-Este repositorio contiene el módulo **Agente y backend** (historias US-C1 a US-C7): la API en FastAPI, la base de datos SQLite, el loop del agente, la explicación de cada replanificación y el script de demo.
+## Los tres módulos
 
-> **Estado actual:** los endpoints del estimador y del planificador (`/estimar`, `/estimador/actualizar`, `/planificar`) devuelven datos fijos que cumplen el contrato. Se reemplazan cuando se conecten los módulos reales de Alvaro (estimador) y Cárdenas (planificador).
+El sistema son tres módulos, uno por integrante. Ninguno llama a otro directamente: todo pasa por el agente, lo que permite trabajar en paralelo contra un **contrato de API** común (`schemas.py`).
+
+| Módulo | Responsable | Historias | Qué hace | Estado |
+|---|---|---|---|---|
+| **Estimador y evaluación** | Alvaro | US-A1 a US-A8 | Aprende la duración por tipo de tarea, con incertidumbre, y mezcla la estimación del usuario con la historia | Lógica de estimación y adaptación lista (US-A1–A3, A7) |
+| **Planificador e interfaz** | Juan David Cárdenas | US-B1 a US-B7 | Resuelve un CSP (OR-Tools CP-SAT): ubica tareas en bloques libres sin solaparlas, respetando plazos y descansos | Pendiente |
+| **Agente y backend** | Juan David Chacón | US-C1 a US-C7 | API en FastAPI + SQLite, loop del agente, explicación y demo | Funcionando; estimador real conectado, planificador en mock |
+
+> **Estado de la integración:** el **estimador** de Alvaro está conectado al backend (`/estimar` y `/estimador/actualizar` usan `estimador.py`, no mocks). El **planificador** (`/planificar`) todavía devuelve datos fijos hasta que Cárdenas lo entregue. Ver [Estimador adaptativo](#estimador-adaptativo-us-a1-a-us-a8).
 
 ## Estructura
+
+### Estimador (Alvaro)
+
+| Archivo | Qué contiene | Historias |
+|---|---|---|
+| `estimador.py` | Estimador bayesiano por tipo de tarea + adaptador al contrato | US-A1, US-A2, US-A3, US-A7 |
+| `prueba_estimador.py` | Script de convergencia: evidencia de que aprender mejora la predicción | US-A2, US-A3 |
+| `docs/estimador.md` | Documentación del módulo, API y preguntas del jurado | — |
+
+### Agente y backend (Chacón)
 
 | Archivo | Qué contiene | Historias |
 |---|---|---|
@@ -19,13 +37,27 @@ Este repositorio contiene el módulo **Agente y backend** (historias US-C1 a US-
 
 ## Requisitos e instalación
 
-Python 3.9 o superior y Pydantic v2.
+Python 3.9 o superior.
+
+El **estimador** (`estimador.py`, `prueba_estimador.py`) no necesita dependencias externas: usa solo la biblioteca estándar. Se puede ejecutar y probar sin instalar nada.
+
+El **backend y agente** necesita FastAPI, Pydantic v2 y SQLAlchemy:
 
 ```bash
 pip install fastapi uvicorn sqlalchemy requests
 ```
 
 ## Cómo ejecutar
+
+### Estimador (sin servidor)
+
+```bash
+python prueba_estimador.py
+```
+
+Corre la demostración de convergencia del estimador. Ver [Estimador adaptativo](#estimador-adaptativo-us-a1-a-us-a8).
+
+### Backend y agente
 
 ```bash
 uvicorn main:app --reload
@@ -130,6 +162,49 @@ Devuelve la nueva agenda con la explicación (misma forma que la salida de `/pla
 - Fechas en ISO 8601, hora local, sin zona horaria. Se acepta `2026-11-17T18:00`; las respuestas llevan segundos (`2026-11-17T18:00:00`).
 - `explicacion` es opcional: el planificador no la envía. Solo llega con texto en la respuesta de `/tareas/{id}/terminar`.
 
+## Estimador adaptativo (US-A1 a US-A8)
+
+El estimador aprende cuánto dura cada **tipo** de tarea y predice tareas nuevas mezclando la estimación del usuario con la historia aprendida, ponderando por cantidad de datos:
+
+```
+d_hat = w * mu + (1 - w) * e        con    w = n / (n + k)
+```
+
+Con 0 observaciones la predicción es la estimación del usuario; con muchas, se acerca a la media real aprendida. La media y la varianza se actualizan incrementalmente con el método de Welford, y de la varianza sale un nivel de confianza (`alta` / `media` / `baja`).
+
+Uso directo de la clase:
+
+```python
+from estimador import Estimador
+
+est = Estimador()
+est.actualizar("programacion", 180)        # aprende de una tarea terminada
+pred = est.predecir("programacion", 90)    # predice la próxima
+print(pred.duracion_esperada_min, pred.confianza, pred.n_observaciones)
+```
+
+### Cómo quedó conectado al backend
+
+`estimador.py` trae un adaptador que produce los objetos exactos del contrato (`schemas.py`), con minutos **enteros**. Así está cableado en `main.py` (reemplazó los mocks de `/estimar` y `/estimador/actualizar`):
+
+```python
+from estimador import Estimador, estimar_contrato, actualizar_contrato
+
+estimador = Estimador()
+
+@app.post("/estimar", response_model=schemas.EstimarResponse)
+def estimar(payload: schemas.EstimarRequest):
+    return estimar_contrato(estimador, payload)
+
+@app.post("/estimador/actualizar", response_model=schemas.ActualizarEstimadorResponse)
+def actualizar_estimador(payload: schemas.ActualizarEstimadorRequest):
+    return actualizar_contrato(estimador, payload)
+```
+
+El loop del agente no cambia: ya lee `media_min`, `incertidumbre_min` y `n_observaciones` de la respuesta.
+
+Detalle completo del módulo (fórmulas, umbrales de confianza, mapa de nombres y preguntas del jurado) en [`docs/estimador.md`](docs/estimador.md).
+
 ## El loop del agente (US-C5)
 
 Al terminar una tarea, `POST /tareas/{id}/terminar` guarda el registro y ejecuta el ciclo completo, dejando un log por paso en la consola de uvicorn:
@@ -189,7 +264,7 @@ sqlite3 focusflow.db "ALTER TABLE tareas ADD COLUMN nombre VARCHAR NOT NULL DEFA
 
 ## Limitaciones conocidas y pendientes
 
-- **Mocks.** Mientras estimador y planificador devuelvan datos fijos, la agenda vieja y la nueva son iguales y la explicación siempre dice "El resto de la agenda no cambió".
+- **Mocks.** El estimador real (`estimador.py`) ya está cableado en `main.py`: `/estimar` y `/estimador/actualizar` usan datos reales y el log del agente refleja la media e incertidumbre aprendidas. El **planificador** sigue siendo un mock (datos fijos): mientras `/planificar` no sea real, la agenda vieja y la nueva salen iguales y la explicación dice "El resto de la agenda no cambió".
 - **Un solo usuario.** No hay tabla ni columna de usuario; los bloques libres no se asocian a nadie.
 - **Sin endpoint de "empezar".** Las horas de inicio y fin se envían juntas al terminar la tarea.
 - **Sin endpoint para consultar la agenda actual.** La agenda solo se devuelve al terminar una tarea.
