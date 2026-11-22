@@ -173,6 +173,35 @@ El script:
 
 Cada ejecución crea 3 tareas y un registro nuevos. Para que la tarea atrasada sea la #1, arranca con una base limpia (borra `focusflow.db`). **No corras la demo sobre la base donde se registran las tareas reales del equipo**, porque ensucia la tabla `registros` que usa la evaluación.
 
+## Planificador e interfaz (US-B1 a US-B7)
+
+Módulo de Cárdenas. Detalle completo (formulación, evidencia, preguntas del jurado y límites) en [`docs/planificador.md`](docs/planificador.md).
+
+| Archivo | Qué contiene | Historias |
+|---|---|---|
+| `planificador.py` | CSP con OR-Tools CP-SAT + adaptador al contrato | US-B1 a US-B4 |
+| `planificador_lineas_base.py` | EDF (línea base), recocido simulado y cota inferior | Evidencia |
+| `prueba_planificador.py` | Pruebas de restricciones, prioridad, determinismo, contrato y tiempo | US-B1 a US-B4 |
+| `evaluacion_planificador.py` | Comparación contra las líneas base en escenarios no vistos | Evidencia |
+| `frontend/` | Las cinco pantallas (React + Vite) | US-B5, US-B6 |
+
+`/planificar` ya usa el planificador real (no un mock). Cada tarea va entera en un bloque libre, sin solapes y con descanso; los plazos son blandos y el objetivo minimiza, en este orden, la prioridad que queda sin agendar, el atraso ponderado y el riesgo de la tarea más justa. **Prioridad: mayor número = más importante.**
+
+```bash
+pip install ortools
+python planificador.py               # ejemplo: 3 tareas en 2 bloques
+python prueba_planificador.py        # pruebas (también con pytest)
+python evaluacion_planificador.py    # CP-SAT contra EDF y recocido simulado
+```
+
+Interfaz, con el backend corriendo en otra terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev                          # http://localhost:5173
+```
+
 ## Base de datos
 
 | Tabla | Columnas |

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 import models
 import schemas
+from planificador import planificar_contrato
 from database import Base, engine, get_db
 from explicacion import generar_explicacion
 
@@ -126,17 +127,8 @@ def actualizar_estimador(payload: schemas.ActualizarEstimadorRequest):
 
 @app.post("/planificar", response_model=schemas.PlanificarResponse)
 def planificar(payload: schemas.PlanificarRequest):
-    return schemas.PlanificarResponse(
-        factible=True,
-        agenda=[
-            schemas.AgendaItem(
-                tarea_id=1,
-                inicio=datetime(2026, 11, 17, 18, 0),
-                fin=datetime(2026, 11, 17, 20, 22),
-            )
-        ],
-        en_riesgo=[schemas.TareaEnRiesgo(tarea_id=3, holgura_min=-25)],
-    )
+    # Planificador real (US-B1 a US-B4): CSP resuelto con OR-Tools CP-SAT.
+    return planificar_contrato(payload)
 
 
 
