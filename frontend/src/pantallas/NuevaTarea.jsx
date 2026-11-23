@@ -1,9 +1,16 @@
 import { useEffect, useState } from 'react'
-import { crearTarea, estimar } from '../api.js'
+import { crearTarea, estimar, interpretar } from '../api.js'
 import { CajaError, Confianza, Encabezado } from '../componentes.jsx'
-import { PRIORIDADES, TIPOS, aIsoLocal, fmtDuracion, sumarDias } from '../formato.js'
+import { PRIORIDADES, TIPOS, aIsoLocal, desdeIso, fmtDuracion, sumarDias } from '../formato.js'
 
 const DURACIONES_RAPIDAS = [30, 60, 90, 120, 180]
+
+const NOMBRE_FUENTE = { claude: 'Claude', ollama: 'el modelo local', reglas: 'el intérprete básico' }
+const TEXTO_FALTANTE = {
+  nombre: 'el nombre',
+  limite: 'la fecha límite',
+  estimacion_usuario_min: 'cuánto crees que te toma',
+}
 
 function limitePorDefecto() {
   const d = sumarDias(new Date(), 1)
@@ -21,6 +28,12 @@ export default function NuevaTarea({ ir, avisar }) {
   const [prediccion, setPrediccion] = useState(null)
   const [error, setError] = useState(null)
   const [enviando, setEnviando] = useState(false)
+  // Escribir la tarea en lenguaje natural (POST /interpretar).
+  const [frase, setFrase] = useState('')
+  const [interpretando, setInterpretando] = useState(false)
+  const [interpretacion, setInterpretacion] = useState(null)
+  const [errorFrase, setErrorFrase] = useState(null)
+  const faltantes = new Set(interpretacion?.faltantes ?? [])
 
   // Mientras el usuario escribe, preguntarle al estimador qué cree él (US-A3/A7).
   useEffect(() => {
@@ -42,6 +55,28 @@ export default function NuevaTarea({ ir, avisar }) {
       clearTimeout(t)
     }
   }, [tipo, estimacion])
+
+  async function interpretarFrase(evento) {
+    evento?.preventDefault()
+    if (frase.trim().length < 3) return
+    setInterpretando(true)
+    setErrorFrase(null)
+    try {
+      const r = await interpretar(frase.trim())
+      const t = r.tarea
+      if (t.nombre) setNombre(t.nombre)
+      if (TIPOS.some((x) => x.valor === t.tipo)) setTipo(t.tipo)
+      // Sin fecha entendida, el campo queda vacío para que el usuario la elija (no se inventa una).
+      setLimite(t.limite ? aIsoLocal(desdeIso(t.limite)) : '')
+      setPrioridad(t.prioridad)
+      if (t.estimacion_usuario_min) setEstimacion(t.estimacion_usuario_min)
+      setInterpretacion(r)
+    } catch (e) {
+      setErrorFrase(e)
+    } finally {
+      setInterpretando(false)
+    }
+  }
 
   const limiteEnPasado = limite && new Date(limite) < new Date()
   const valido = nombre.trim() && limite && estimacion > 0
@@ -75,8 +110,46 @@ export default function NuevaTarea({ ir, avisar }) {
         FocusFlow la ubica en tu tiempo libre usando lo que ha aprendido de tareas parecidas.
       </Encabezado>
 
-      <form className="formulario" onSubmit={enviar} noValidate>
+      <form className="frase" onSubmit={interpretarFrase}>
         <label className="campo">
+          <span>Escríbela como se la dirías a alguien</span>
+          <textarea
+            value={frase}
+            onChange={(e) => setFrase(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) interpretarFrase(e)
+            }}
+            rows={2}
+            maxLength={500}
+            placeholder="Ej.: tengo el taller de cálculo para el jueves a las 6 pm, me toma como 2 horas y es importante"
+            autoFocus
+          />
+        </label>
+        <div className="acciones">
+          <button type="submit" className="boton secundario" disabled={interpretando || frase.trim().length < 3}>
+            {interpretando ? 'Interpretando…' : 'Llenar el formulario'}
+          </button>
+        </div>
+        <CajaError error={errorFrase} />
+        {interpretacion && (
+          <div className="caja caja-info" aria-live="polite">
+            <p>
+              Lo interpretó {NOMBRE_FUENTE[interpretacion.fuente] ?? interpretacion.fuente}
+              {interpretacion.modelo && <span className="ayuda"> ({interpretacion.modelo})</span>}. Revisa los
+              campos antes de registrar: nada se guarda sin tu confirmación.
+            </p>
+            {interpretacion.faltantes.length > 0 && (
+              <p className="texto-alerta">
+                No entendí {interpretacion.faltantes.map((f) => TEXTO_FALTANTE[f] ?? f).join(', ')}: complétalo abajo.
+              </p>
+            )}
+            {interpretacion.aviso && <p className="ayuda">{interpretacion.aviso}</p>}
+          </div>
+        )}
+      </form>
+
+      <form className="formulario" onSubmit={enviar} noValidate>
+        <label className={`campo ${faltantes.has('nombre') ? 'falta' : ''}`}>
           <span>Nombre</span>
           <input
             type="text"
@@ -85,7 +158,6 @@ export default function NuevaTarea({ ir, avisar }) {
             placeholder="Ej.: Taller 3 de Cálculo"
             maxLength={120}
             required
-            autoFocus
           />
         </label>
 
@@ -108,7 +180,7 @@ export default function NuevaTarea({ ir, avisar }) {
         </fieldset>
 
         <div className="fila-campos">
-          <label className="campo">
+          <label className={`campo ${faltantes.has('limite') ? 'falta' : ''}`}>
             <span>Fecha límite</span>
             <input type="datetime-local" value={limite} onChange={(e) => setLimite(e.target.value)} required />
             {limiteEnPasado && <span className="ayuda texto-alerta">Esa fecha ya pasó: la tarea nacerá atrasada.</span>}
@@ -133,7 +205,7 @@ export default function NuevaTarea({ ir, avisar }) {
           </fieldset>
         </div>
 
-        <fieldset className="campo">
+        <fieldset className={`campo ${faltantes.has('estimacion_usuario_min') ? 'falta' : ''}`}>
           <legend>¿Cuánto crees que te va a tomar?</legend>
           <div className="fila-estimacion">
             <input

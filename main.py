@@ -15,6 +15,11 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="FocusFlow API", version="0.1.0")
 
+# Asistente en lenguaje natural (Cárdenas): POST /interpretar, POST /asistente, GET /asistente/estado.
+from asistente import router as router_asistente  # noqa: E402
+
+app.include_router(router_asistente)
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("focusflow.agente")

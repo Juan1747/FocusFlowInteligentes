@@ -73,6 +73,33 @@ export const estimar = (tipo, estimacionUsuarioMin) =>
 
 export const planificar = (peticion) => llamar('POST', '/planificar', peticion)
 
+// ---------- Asistente en lenguaje natural ----------
+
+export const estadoAsistente = () => llamar('GET', '/asistente/estado')
+
+// Frase -> tarea estructurada. No guarda nada: el usuario revisa el formulario.
+export const interpretar = (texto) => llamar('POST', '/interpretar', { texto })
+
+// mensajes: [{ rol: 'usuario' | 'asistente', texto }]
+export const conversarAsistente = (mensajes) => llamar('POST', '/asistente', { mensajes })
+
+/**
+ * Aplica una propuesta del agente con los endpoints de siempre, después de que
+ * el usuario la confirma. El backend ya validó `datos` contra los mismos esquemas.
+ */
+export function aplicarPropuesta(propuesta) {
+  switch (propuesta.accion) {
+    case 'crear_tarea':
+      return crearTarea(propuesta.datos)
+    case 'editar_tarea':
+      return editarTarea(propuesta.tarea_id, propuesta.datos)
+    case 'bloques_dia':
+      return guardarBloquesDia(propuesta.datos.dia, propuesta.datos.bloques)
+    default:
+      return Promise.reject(new ErrorApi(`Acción desconocida: ${propuesta.accion}`, 0))
+  }
+}
+
 // ---------- Agenda actual ----------
 
 const DESCANSO_MIN = 15 // el mismo que usa el agente

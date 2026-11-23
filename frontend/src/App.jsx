@@ -4,11 +4,13 @@ import NuevaTarea from './pantallas/NuevaTarea.jsx'
 import BloquesLibres from './pantallas/BloquesLibres.jsx'
 import AgendaPropuesta from './pantallas/AgendaPropuesta.jsx'
 import Replanificacion from './pantallas/Replanificacion.jsx'
+import Asistente from './pantallas/Asistente.jsx'
 
-// Las cinco pantallas del MVP (US-B5, US-B6). Navegación por #hash: sin
-// dependencias extra y funciona igual en `vite` y en `vite preview`.
+// Las cinco pantallas del MVP (US-B5, US-B6) más el asistente. Navegación por
+// #hash: sin dependencias extra y funciona igual en `vite` y en `vite preview`.
 const PANTALLAS = [
   { ruta: 'hoy', titulo: 'Hoy', componente: Hoy },
+  { ruta: 'asistente', titulo: 'Asistente', componente: Asistente },
   { ruta: 'nueva', titulo: 'Nueva tarea', componente: NuevaTarea },
   { ruta: 'bloques', titulo: 'Bloques libres', componente: BloquesLibres },
   { ruta: 'agenda', titulo: 'Agenda', componente: AgendaPropuesta },
