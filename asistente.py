@@ -19,12 +19,14 @@ Principio de diseño: el modelo de lenguaje propone, el sistema decide.
       reglas (que además es la línea base de la evaluación) y la interfaz
       conserva el formulario.
 
-Proveedores (variable de entorno FOCUSFLOW_LLM = auto | claude | ollama | reglas):
+Proveedores (variable de entorno FOCUSFLOW_LLM = auto | claude | gemini | ollama | reglas):
     claude  Claude Haiku 5.5 para interpretar y Claude Opus 5.5 para el chat.
             Necesita ANTHROPIC_API_KEY (o un perfil de `ant auth login`).
+    gemini  Gemini Flash-Lite para interpretar y Gemini Flash para el chat, con
+            el plan gratuito de Google AI Studio. Necesita GEMINI_API_KEY.
     ollama  modelo local y gratuito (por defecto qwen2.5:3b) en Ollama.
     reglas  sin modelo de lenguaje (solo /interpretar).
-    auto    Claude si hay credenciales; si no, Ollama si está corriendo; si no, reglas.
+    auto    el primero disponible en ese orden: Claude, Gemini, Ollama, reglas.
 """
 
 from __future__ import annotations
@@ -63,6 +65,10 @@ ESTIMACION_MIN, ESTIMACION_MAX = 5, 24 * 60
 
 MODELO_CLAUDE_INTERPRETAR = "claude-haiku-5-5"
 MODELO_CLAUDE_CHAT = "claude-opus-5-5"
+# Alias "-latest" de Google: apuntan a la versión vigente de cada familia.
+MODELO_GEMINI_INTERPRETAR = os.environ.get("FOCUSFLOW_GEMINI_MODELO_INTERPRETAR", "gemini-flash-lite-latest")
+MODELO_GEMINI_CHAT = os.environ.get("FOCUSFLOW_GEMINI_MODELO_CHAT", "gemini-flash-latest")
+URL_GEMINI = "https://generativelanguage.googleapis.com/v1beta"
 MODELO_OLLAMA = os.environ.get("FOCUSFLOW_OLLAMA_MODELO", "qwen2.5:3b")
 URL_OLLAMA = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 MAX_PASOS_AGENTE = 8          # rondas de herramientas por mensaje del usuario
@@ -537,6 +543,169 @@ class ProveedorClaude(Proveedor):
         return Turno(texto, llamadas, crudo=respuesta.content)
 
 
+def esquema_gemini(esquema: dict) -> dict:
+    """JSON Schema (el de Claude y Ollama) -> el subconjunto OpenAPI que acepta
+    Gemini: `anyOf [X, null]` pasa a `nullable`, los tipos van en mayúscula,
+    `enum` solo se permite en textos y no existe `additionalProperties`."""
+    if "anyOf" in esquema:
+        opciones = [o for o in esquema["anyOf"] if o.get("type") != "null"]
+        base = esquema_gemini(opciones[0]) if len(opciones) == 1 else {"type": "STRING"}
+        if len(opciones) < len(esquema["anyOf"]):
+            base["nullable"] = True
+        return base
+    salida: Dict[str, Any] = {}
+    tipo = esquema.get("type")
+    if tipo:
+        salida["type"] = tipo.upper()
+    descripcion = esquema.get("description", "")
+    if "enum" in esquema:
+        if tipo == "string":
+            salida["enum"] = list(esquema["enum"])
+        else:  # Gemini no admite enum numérico: va en la descripción y se valida al normalizar
+            descripcion = (descripcion + " Uno de: " + ", ".join(map(str, esquema["enum"])) + ".").strip()
+    if descripcion:
+        salida["description"] = descripcion
+    if "properties" in esquema:
+        salida["properties"] = {k: esquema_gemini(v) for k, v in esquema["properties"].items()}
+        salida["required"] = list(esquema.get("required", []))
+        salida["propertyOrdering"] = list(esquema["properties"])
+    if "items" in esquema:
+        salida["items"] = esquema_gemini(esquema["items"])
+    return salida
+
+
+class ProveedorGemini(Proveedor):
+    """Gemini por la API REST de Google AI Studio (sirve el plan gratuito).
+
+    Ojo: en el plan gratuito Google puede usar lo que se envía para mejorar sus
+    productos. Se documenta en docs/asistente.md y se dice en la sustentación."""
+
+    fuente = "gemini"
+
+    def __init__(self, clave: Optional[str] = None,
+                 modelo_interpretar: str = MODELO_GEMINI_INTERPRETAR,
+                 modelo_chat: str = MODELO_GEMINI_CHAT, url: str = URL_GEMINI) -> None:
+        self._clave = clave or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not self._clave:
+            raise ErrorLLM("Falta GEMINI_API_KEY.")
+        self._modelos = {"interpretar": modelo_interpretar, "chat": modelo_chat}
+        self.url = url
+
+    def modelo(self, uso):
+        return self._modelos[uso]
+
+    def _generar(self, uso: str, cuerpo: dict) -> dict:
+        import requests
+
+        modelo = self._modelos[uso]
+        for intento in range(2):
+            try:
+                # La clave va en un encabezado, nunca en la URL (así no queda en logs).
+                respuesta = requests.post(f"{self.url}/models/{modelo}:generateContent", json=cuerpo,
+                                          headers={"x-goog-api-key": self._clave}, timeout=90)
+            except requests.RequestException as e:
+                raise ErrorLLM("No hay conexión con la API de Gemini.") from e
+            if respuesta.status_code == 429 and intento == 0:
+                espera = self._espera_sugerida(respuesta)
+                if espera is not None and espera <= 20:
+                    reloj.sleep(espera)
+                    continue
+            break
+        if respuesta.status_code == 429:
+            raise ErrorLLM(f"Se agotó la cuota gratuita de Gemini para {modelo}; intenta más tarde "
+                           "o usa un modelo con más cuota (ver docs/asistente.md).")
+        if respuesta.status_code in (400, 401, 403) and "API_KEY" in respuesta.text:
+            raise ErrorLLM("La clave de la API de Gemini no es válida.")
+        if respuesta.status_code == 404:
+            raise ErrorLLM(f"Gemini no reconoce el modelo {modelo}.")
+        if respuesta.status_code >= 400:
+            raise ErrorLLM(f"Gemini respondió con un error ({respuesta.status_code}).")
+        try:
+            datos = respuesta.json()
+        except ValueError as e:
+            raise ErrorLLM("Gemini devolvió una respuesta inesperada.") from e
+        if (datos.get("promptFeedback") or {}).get("blockReason"):
+            raise ErrorLLM("Gemini bloqueó la solicitud.")
+        candidatos = datos.get("candidates") or []
+        if not candidatos:
+            raise ErrorLLM("Gemini no devolvió respuesta.")
+        candidato = candidatos[0]
+        if candidato.get("finishReason") == "MAX_TOKENS":
+            raise ErrorLLM("La respuesta de Gemini quedó incompleta.")
+        return candidato.get("content") or {"role": "model", "parts": []}
+
+    @staticmethod
+    def _espera_sugerida(respuesta) -> Optional[float]:
+        """Segundos que Google pide esperar tras un 429 (campo retryDelay), si los da."""
+        try:
+            for detalle in respuesta.json().get("error", {}).get("details", []):
+                demora = str(detalle.get("retryDelay", ""))
+                if demora.endswith("s"):
+                    return float(demora[:-1]) + 0.5
+        except (ValueError, AttributeError):
+            pass
+        return None
+
+    def json(self, sistema, texto, esquema):
+        contenido = self._generar("interpretar", {
+            "systemInstruction": {"parts": [{"text": sistema}]},
+            "contents": [{"role": "user", "parts": [{"text": texto}]}],
+            "generationConfig": {"temperature": 0, "responseMimeType": "application/json",
+                                 "responseSchema": esquema_gemini(esquema)},
+        })
+        texto_json = "".join(p.get("text", "") for p in contenido.get("parts", []) if not p.get("thought"))
+        try:
+            return json.loads(texto_json)
+        except json.JSONDecodeError as e:
+            raise ErrorLLM("Gemini devolvió un JSON inválido.") from e
+
+    @staticmethod
+    def _respuesta_herramienta(r: ResultadoHerramienta) -> dict:
+        try:
+            valor = json.loads(r.contenido)
+        except json.JSONDecodeError:
+            valor = r.contenido
+        if r.es_error:
+            return {"error": valor}
+        return valor if isinstance(valor, dict) else {"resultado": valor}
+
+    def paso(self, sistema, historial, herramientas):
+        contenidos = []
+        for h in historial:
+            if h["rol"] == "usuario":
+                contenidos.append({"role": "user", "parts": [{"text": h["texto"]}]})
+            elif h["rol"] == "asistente":
+                # Se reenvía el contenido original: conserva las firmas de
+                # razonamiento (thoughtSignature) que Gemini exige en el loop.
+                contenidos.append(h.get("crudo") or {"role": "model", "parts": [{"text": h["texto"] or "…"}]})
+            else:
+                partes = []
+                for r in h["resultados"]:
+                    respuesta = {"name": r.nombre, "response": self._respuesta_herramienta(r)}
+                    if not r.id.startswith("gem-"):  # id que puso Gemini: se devuelve
+                        respuesta["id"] = r.id
+                    partes.append({"functionResponse": respuesta})
+                contenidos.append({"role": "user", "parts": partes})
+        contenido = self._generar("chat", {
+            "systemInstruction": {"parts": [{"text": sistema}]},
+            "contents": contenidos,
+            "tools": [{"functionDeclarations": [
+                {"name": h.nombre, "description": h.descripcion, "parameters": esquema_gemini(h.parametros)}
+                for h in herramientas]}],
+            "generationConfig": {"temperature": 0.2},
+        })
+        partes = contenido.get("parts", [])
+        texto = "".join(p.get("text", "") for p in partes if not p.get("thought")).strip()
+        llamadas = []
+        for p in partes:
+            llamada = p.get("functionCall")
+            if llamada:
+                llamadas.append(LlamadaHerramienta(llamada.get("id") or f"gem-{uuid.uuid4().hex[:10]}",
+                                                   llamada.get("name", ""), dict(llamada.get("args") or {})))
+        contenido.setdefault("role", "model")
+        return Turno(texto, llamadas, crudo=contenido)
+
+
 class ProveedorOllama(Proveedor):
     """Modelo local y gratuito servido por Ollama (https://ollama.com)."""
 
@@ -630,6 +799,12 @@ def elegir_proveedor() -> Optional[Proveedor]:
             return ProveedorClaude()
         except ImportError:
             logger.warning("FOCUSFLOW_LLM pide Claude pero falta el paquete: pip install anthropic")
+    hay_gemini = any(os.environ.get(v) for v in ("GEMINI_API_KEY", "GOOGLE_API_KEY"))
+    if preferido == "gemini" or (preferido == "auto" and hay_gemini):
+        try:
+            return ProveedorGemini()
+        except ErrorLLM as e:
+            logger.warning("FOCUSFLOW_LLM pide Gemini: %s", e)
     if preferido in ("auto", "ollama") and ProveedorOllama.disponible():
         return ProveedorOllama()
     return None
@@ -1094,7 +1269,7 @@ def endpoint_asistente(payload: AsistenteRequest,
                        backend=Depends(dependencias_backend)):
     if proveedor is None:
         raise HTTPException(status_code=503, detail=(
-            "El asistente necesita un modelo de lenguaje. Configura ANTHROPIC_API_KEY o inicia Ollama "
+            "El asistente necesita un modelo de lenguaje. Configura GEMINI_API_KEY o ANTHROPIC_API_KEY, o inicia Ollama "
             f"con el modelo {MODELO_OLLAMA} (ver docs/asistente.md)."))
     peticion_plan, planificar = backend
     ctx = Contexto(db=db, ahora=datetime.now().replace(second=0, microsecond=0),

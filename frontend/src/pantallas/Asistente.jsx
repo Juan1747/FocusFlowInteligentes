@@ -187,7 +187,7 @@ export default function Asistente({ ir, avisar }) {
             <strong>El asistente no tiene un modelo de lenguaje disponible.</strong> {estado.mensaje}
           </p>
           <p className="ayuda">
-            Inicia Ollama con el modelo local o configura una clave de Claude (ver docs/asistente.md). Mientras
+            Configura una clave gratuita de Gemini, una de Claude o inicia Ollama con el modelo local (ver docs/asistente.md). Mientras
             tanto puedes escribir tareas en lenguaje natural en{' '}
             <button type="button" className="enlace" onClick={() => ir('nueva')}>
               Nueva tarea

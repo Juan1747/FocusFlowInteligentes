@@ -4,6 +4,7 @@ FocusFlow — Evaluación de POST /interpretar (frase -> tarea).
 Compara, sobre las mismas frases de datos/frases_interpretar.json:
     reglas   intérprete por palabras clave y expresiones de fecha (línea base, sin LLM)
     claude   Claude Haiku 5.5 con salida estructurada       (si hay ANTHROPIC_API_KEY)
+    gemini   Gemini Flash-Lite (plan gratuito)              (si hay GEMINI_API_KEY)
     ollama   modelo local en Ollama                          (si está corriendo)
 
 Métrica por campo (exactitud): tipo, fecha, hora, prioridad, estimación y si el
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import time
 from datetime import datetime
@@ -40,6 +42,8 @@ def proveedor_para(metodo: str):
         return None
     if metodo == "claude":
         return asistente.ProveedorClaude()
+    if metodo == "gemini":
+        return asistente.ProveedorGemini()
     if metodo == "ollama":
         if not asistente.ProveedorOllama.disponible():
             raise SystemExit(f"Ollama no está corriendo o no tiene el modelo {asistente.MODELO_OLLAMA}.")
@@ -56,6 +60,8 @@ def metodos_disponibles() -> list[str]:
             metodos.append("claude")
     except ImportError:
         pass
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        metodos.append("gemini")
     if asistente.ProveedorOllama.disponible():
         metodos.append("ollama")
     return metodos
@@ -73,11 +79,13 @@ def comparar(salida: asistente.InterpretarResponse, esperado: dict) -> dict[str,
     }
 
 
-def evaluar(metodo: str, frases: list[dict], ahora: datetime, detalle: bool) -> dict:
+def evaluar(metodo: str, frases: list[dict], ahora: datetime, detalle: bool, pausa: float = 0.0) -> dict:
     proveedor = proveedor_para(metodo)
     aciertos = {c: 0 for c in CAMPOS}
     completas, tiempos, errores, avisos = 0, [], [], 0
-    for f in frases:
+    for i, f in enumerate(frases):
+        if pausa and i:
+            time.sleep(pausa)  # respeta el límite por minuto de los planes gratuitos
         inicio = time.perf_counter()
         salida = asistente.interpretar(f["texto"], ahora, proveedor)
         tiempos.append(time.perf_counter() - inicio)
@@ -121,7 +129,9 @@ def tabla(resultados: list[dict]) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--conjunto", choices=["ciego", "prueba", "ajuste", "todo"], default="ciego")
-    parser.add_argument("--metodos", nargs="+", choices=["reglas", "claude", "ollama"])
+    parser.add_argument("--metodos", nargs="+", choices=["reglas", "claude", "gemini", "ollama"])
+    parser.add_argument("--pausa", type=float, default=4.5,
+                        help="segundos entre llamadas a Gemini (plan gratuito: ~15 por minuto)")
     parser.add_argument("--detalle", action="store_true", help="imprime cada frase mal interpretada")
     parser.add_argument("--guardar", action="store_true", help=f"escribe {SALIDA.relative_to(RAIZ)}")
     args = parser.parse_args()
@@ -131,7 +141,8 @@ def main() -> None:
     frases = [f for f in datos["frases"] if args.conjunto == "todo" or f["conjunto"] == args.conjunto]
     metodos = args.metodos or metodos_disponibles()
 
-    resultados = [evaluar(m, frases, ahora, args.detalle) for m in metodos]
+    resultados = [evaluar(m, frases, ahora, args.detalle, args.pausa if m == "gemini" else 0.0)
+                  for m in metodos]
     texto = tabla(resultados)
     print(f"\nConjunto: {args.conjunto} ({len(frases)} frases) · referencia: {datos['ahora']}\n")
     print(texto)

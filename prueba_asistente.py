@@ -12,6 +12,7 @@ Ejecutar:
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI
@@ -332,6 +333,118 @@ def prueba_proveedor_ollama_arma_la_peticion():
         assert {t["function"]["name"] for t in enviados[1]["tools"]} == {h.nombre for h in a.HERRAMIENTAS}
     finally:
         requests.post = original
+
+
+def _recorrer(esquema):
+    yield esquema
+    for hijo in list(esquema.get("properties", {}).values()) + ([esquema["items"]] if "items" in esquema else []):
+        yield from _recorrer(hijo)
+
+
+def prueba_esquemas_para_gemini():
+    convertido = a.esquema_gemini(a.ESQUEMA_INTERPRETACION)
+    assert convertido["properties"]["fecha_limite"] == {"type": "STRING", "description": "AAAA-MM-DD", "nullable": True}
+    assert convertido["properties"]["tipo"]["enum"] == list(a.TIPOS)
+    prioridad = convertido["properties"]["prioridad"]
+    assert "enum" not in prioridad and "1, 2, 3" in prioridad["description"]  # Gemini no admite enum numérico
+    for esquema in [a.ESQUEMA_INTERPRETACION] + [h.parametros for h in a.HERRAMIENTAS]:
+        for nodo in _recorrer(a.esquema_gemini(esquema)):
+            assert not {"anyOf", "additionalProperties"} & set(nodo), nodo
+            assert nodo.get("type", "X").isupper()
+
+
+def prueba_proveedor_gemini_arma_la_peticion():
+    import requests
+    enviados, respuestas = [], []
+
+    class Respuesta:
+        def __init__(self, codigo, datos):
+            self.status_code, self.datos, self.text = codigo, datos, json.dumps(datos)
+
+        def json(self):
+            return self.datos
+
+    def post_falso(url, json, headers, timeout):
+        enviados.append({"url": url, "cuerpo": json, "headers": headers})
+        return respuestas.pop(0)
+
+    def candidato(*partes):
+        return Respuesta(200, {"candidates": [{"content": {"role": "model", "parts": list(partes)},
+                                               "finishReason": "STOP"}]})
+
+    original_post, original_sleep = requests.post, a.reloj.sleep
+    requests.post, a.reloj.sleep = post_falso, lambda s: None
+    try:
+        p = a.ProveedorGemini(clave="clave-falsa", modelo_interpretar="lite", modelo_chat="flash", url="http://g")
+
+        # Interpretar: salida JSON con esquema convertido; la clave va en el encabezado, no en la URL.
+        respuestas.append(candidato({"text": '{"nombre": "Y"}'}))
+        assert p.json("s", "t", a.ESQUEMA_INTERPRETACION) == {"nombre": "Y"}
+        assert enviados[0]["url"] == "http://g/models/lite:generateContent"
+        assert enviados[0]["headers"] == {"x-goog-api-key": "clave-falsa"} and "clave" not in enviados[0]["url"]
+        config = enviados[0]["cuerpo"]["generationConfig"]
+        assert config["responseMimeType"] == "application/json"
+        assert config["responseSchema"] == a.esquema_gemini(a.ESQUEMA_INTERPRETACION)
+
+        # Chat: pide una herramienta; la firma de razonamiento se reenvía en el siguiente paso.
+        respuestas.append(candidato({"functionCall": {"name": "ver_tareas", "args": {"estado": "pendientes"}},
+                                     "thoughtSignature": "firma"}))
+        turno = p.paso("s", [{"rol": "usuario", "texto": "hola"}], a.HERRAMIENTAS)
+        assert enviados[1]["url"].endswith("/models/flash:generateContent")
+        assert {f["name"] for f in enviados[1]["cuerpo"]["tools"][0]["functionDeclarations"]} == \
+            {h.nombre for h in a.HERRAMIENTAS}
+        (llamada,) = turno.llamadas
+        assert llamada.nombre == "ver_tareas" and llamada.argumentos == {"estado": "pendientes"}
+
+        historial = [{"rol": "usuario", "texto": "hola"},
+                     {"rol": "asistente", "texto": turno.texto, "llamadas": turno.llamadas, "crudo": turno.crudo},
+                     {"rol": "herramientas", "resultados": [
+                         a.ResultadoHerramienta(llamada.id, "ver_tareas", '{"tareas": []}')]}]
+        respuestas.append(candidato({"text": "No tienes tareas."}))
+        assert p.paso("s", historial, a.HERRAMIENTAS).texto == "No tienes tareas."
+        contenidos = enviados[2]["cuerpo"]["contents"]
+        assert contenidos[1]["parts"][0]["thoughtSignature"] == "firma"
+        assert contenidos[2] == {"role": "user", "parts": [
+            {"functionResponse": {"name": "ver_tareas", "response": {"tareas": []}}}]}
+
+        # Cuota: un 429 con retryDelay se reintenta una vez; dos seguidos son un error claro.
+        cuota = Respuesta(429, {"error": {"details": [{"retryDelay": "1s"}]}})
+        respuestas.extend([cuota, candidato({"text": '{"nombre": "Z"}'})])
+        assert p.json("s", "t", a.ESQUEMA_INTERPRETACION) == {"nombre": "Z"}
+        respuestas.extend([cuota, cuota])
+        try:
+            p.json("s", "t", a.ESQUEMA_INTERPRETACION)
+            raise AssertionError("debía fallar")
+        except a.ErrorLLM as e:
+            assert "cuota" in str(e)
+        respuestas.append(Respuesta(400, {"error": {"status": "INVALID_ARGUMENT", "message": "API_KEY_INVALID"}}))
+        try:
+            p.json("s", "t", a.ESQUEMA_INTERPRETACION)
+            raise AssertionError("debía fallar")
+        except a.ErrorLLM as e:
+            assert "clave" in str(e)
+    finally:
+        requests.post, a.reloj.sleep = original_post, original_sleep
+
+
+def prueba_eleccion_de_proveedor():
+    variables = ("FOCUSFLOW_LLM", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE",
+                 "GEMINI_API_KEY", "GOOGLE_API_KEY")
+    guardadas = {v: os.environ.pop(v, None) for v in variables}
+    original = a.ProveedorOllama.disponible
+    a.ProveedorOllama.disponible = staticmethod(lambda *x, **k: False)
+    try:
+        assert a.elegir_proveedor() is None
+        os.environ["GEMINI_API_KEY"] = "clave-falsa"
+        assert isinstance(a.elegir_proveedor(), a.ProveedorGemini)
+        os.environ["FOCUSFLOW_LLM"] = "reglas"
+        assert a.elegir_proveedor() is None
+    finally:
+        a.ProveedorOllama.disponible = original
+        for v, valor in guardadas.items():
+            os.environ.pop(v, None)
+            if valor is not None:
+                os.environ[v] = valor
 
 
 # ---------- Endpoints ----------

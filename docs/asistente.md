@@ -8,8 +8,8 @@ Dos funciones que le ponen lenguaje al agente de FocusFlow sin quitarle sus gara
 | Archivo | Qué contiene |
 |---|---|
 | `asistente.py` | Intérprete (LLM y reglas), proveedores, herramientas, loop del agente y endpoints |
-| `prueba_asistente.py` | 14 pruebas, sin llamar a ningún modelo real (proveedor simulado y SQLite en memoria) |
-| `evaluacion_interpretar.py` | Comparación reglas / Claude / Ollama sobre las mismas frases |
+| `prueba_asistente.py` | 17 pruebas, sin llamar a ningún modelo real (proveedor simulado y SQLite en memoria) |
+| `evaluacion_interpretar.py` | Comparación reglas / Claude / Gemini / Ollama sobre las mismas frases |
 | `datos/frases_interpretar.json` | 80 frases con su respuesta esperada (ajuste, prueba, ciego) |
 | `docs/evaluacion_interpretar.md` | Resultados generados por el script |
 | `frontend/src/pantallas/Asistente.jsx` | Pantalla del chat con tarjetas de propuesta |
@@ -42,7 +42,7 @@ frase ──► LLM con salida estructurada (JSON Schema) ──► normalizar_i
 ```
 
 - El prompt incluye un **calendario de los próximos 21 días**, para que el modelo no tenga que calcular qué fecha es "el jueves" (los LLM se equivocan en eso).
-- La salida está restringida por un JSON Schema. Con Claude se usa `output_config.format`, y con Ollama `format`. Se usa el mismo esquema en los dos.
+- La salida está restringida por un JSON Schema. Con Claude se usa `output_config.format`, con Ollama `format` y con Gemini `responseSchema`. Es el mismo esquema; para Gemini, `esquema_gemini()` lo traduce al subconjunto que Google acepta (sin `anyOf` ni enums numéricos).
 - Lo que no se entendió no se inventa: queda en `faltantes` y el formulario lo resalta. Si falta la fecha límite, el campo queda vacío para que el usuario la elija.
 
 Respuesta:
@@ -63,7 +63,7 @@ mensaje ──► LLM ──► ¿pide herramientas? ── sí ──► ejecut
 ```
 
 El loop lo escribimos nosotros, sin el Tool Runner del SDK ni Managed Agents, por dos razones:
-- El mismo loop tiene que servir para Claude, para Ollama y para el modelo simulado de las pruebas.
+- El mismo loop tiene que servir para Claude, Gemini, Ollama y el modelo simulado de las pruebas.
 - Las herramientas leen la base local de la app.
 
 Tiene un máximo de 8 rondas de herramientas por mensaje.
@@ -84,17 +84,35 @@ Cuando el usuario confirma una tarjeta, la interfaz llama a los endpoints de sie
 
 ## 3. Proveedores y cómo activarlos
 
-`FOCUSFLOW_LLM` = `auto` (por defecto) · `claude` · `ollama` · `reglas`
+`FOCUSFLOW_LLM` = `auto` (por defecto) · `claude` · `gemini` · `ollama` · `reglas`
 
 | Proveedor | Interpretar | Chat | Costo | Cuándo |
 |---|---|---|---|---|
 | **Claude** | Claude Haiku 5.5 (`claude-haiku-5-5`) | Claude Opus 5.5 (`claude-opus-5-5`) | de pago, ver abajo | si hay `ANTHROPIC_API_KEY` |
+| **Gemini** | `gemini-flash-lite-latest` | `gemini-flash-latest` | plan gratuito, con cuota diaria | si hay `GEMINI_API_KEY` |
 | **Ollama** | `qwen2.5:3b` (local) | `qwen2.5:3b` | gratis, corre en el equipo | si Ollama está corriendo |
 | **Reglas** | palabras clave y fechas | no disponible | gratis | sin ninguno de los dos |
 
-En `auto` se elige Claude si hay credenciales; si no, Ollama si está corriendo; si no, reglas. Se recalcula cada 30 s, así que encender Ollama no exige reiniciar el backend. `GET /asistente/estado` dice qué se está usando.
+En `auto` se elige el primero disponible en este orden: Claude, Gemini, Ollama, reglas. Se recalcula cada 30 s, así que encender Ollama no exige reiniciar el backend. `GET /asistente/estado` dice qué se está usando.
 
-### Opción gratuita: Ollama (recomendada para desarrollar y como respaldo en la demo)
+### Opción gratuita en la nube: Gemini (la que usa el equipo)
+
+1. Entrar a https://aistudio.google.com con una cuenta de Google y crear una clave en "Get API key". No pide tarjeta.
+2. Ponerla en una variable de entorno **en la terminal donde corre el backend**. Nunca en el código ni en el repositorio:
+   ```powershell
+   $env:GEMINI_API_KEY = "tu-clave"     # PowerShell (solo para esa terminal)
+   uvicorn main:app --reload
+   ```
+   En bash: `export GEMINI_API_KEY=tu-clave`. Para dejarla fija en Windows: `setx GEMINI_API_KEY "tu-clave"` y abrir otra terminal.
+3. `GET /asistente/estado` debe decir `"fuente": "gemini"`.
+
+Qué hay que saber del plan gratuito:
+- **Cuota.** Google la fija por proyecto y la cambia; se ve en AI Studio. Cada mensaje del chat gasta **varias** solicitudes (una por ronda de herramientas), así que el chat consume cuota más rápido que la interpretación. Flash-Lite tiene más cuota que Flash. Si se acaba la de Flash, se puede usar Flash-Lite también en el chat con `FOCUSFLOW_GEMINI_MODELO_CHAT=gemini-flash-lite-latest`.
+- Cuando la cuota se acaba, `/interpretar` sigue funcionando con reglas (con un aviso) y el chat muestra el error.
+- Los modelos se cambian con `FOCUSFLOW_GEMINI_MODELO_INTERPRETAR` y `FOCUSFLOW_GEMINI_MODELO_CHAT`. Los alias `-latest` apuntan siempre a la versión vigente.
+- **Privacidad:** en el plan gratuito, Google puede usar lo que se le envía para mejorar sus productos. Para la demo usen tareas de ejemplo, no datos personales.
+
+### Opción gratuita local: Ollama (respaldo si falla internet en la demo)
 
 1. Instalar Ollama desde https://ollama.com/download (Windows, macOS o Linux).
 2. En una terminal: `ollama pull qwen2.5:3b` (unos 2 GB; cabe en una GPU de 4 GB).
@@ -131,8 +149,11 @@ Resultados actuales (conjunto ciego, ver `docs/evaluacion_interpretar.md`):
 | Método | Tipo | Fecha | Hora | Prioridad | Estimación | Nombre | **Tarea completa** |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | Reglas (línea base) | 93 % | 93 % | 97 % | 93 % | 97 % | 93 % | **73 %** |
+| Gemini Flash-Lite | pendiente: necesita `GEMINI_API_KEY` | | | | | | |
 | Claude Haiku 5.5 | pendiente: necesita `ANTHROPIC_API_KEY` | | | | | | |
 | Ollama `qwen2.5:3b` | pendiente: necesita Ollama instalado | | | | | | |
+
+Con la clave puesta: `python evaluacion_interpretar.py --metodos reglas gemini --guardar`. Deja 4,5 s entre frases para no pasar el límite por minuto (unos 2–3 minutos para las 30 frases); se cambia con `--pausa`.
 
 Lectura honesta:
 - **73 % de tareas completas** significa que con reglas más de 1 de cada 4 frases necesita corrección manual. Las fallas son justo lo que el lenguaje natural tiene de difícil: jerga ("2 horitas", "1 de dic"), matices ("no es *muy* urgente", "crítico") y ambigüedad ("el proyecto de emprendimiento" no es programación).
@@ -145,7 +166,7 @@ Lectura honesta:
 ## 5. Seguridad y privacidad
 
 - **Nada se escribe sin confirmación.** Las herramientas `proponer_*` solo devuelven propuestas validadas; el agente no tiene ninguna herramienta que escriba en la base.
-- **Qué datos salen del equipo:** con Claude, la frase o la conversación y lo que devuelven las herramientas (nombres de tareas, fechas, bloques, historial por tipo). Con Ollama, nada sale del equipo. Esto se dice en la sustentación.
+- **Qué datos salen del equipo:** con Claude o Gemini, la frase o la conversación y lo que devuelven las herramientas (nombres de tareas, fechas, bloques, historial por tipo). En el plan gratuito de Gemini, Google puede usar esos datos para mejorar sus productos. Con Ollama, nada sale del equipo. Esto se dice en la sustentación.
 - **Inyección de instrucciones:** el texto de las tareas es del mismo usuario, y aun si una tarea tuviera instrucciones raras, lo peor que puede pasar es una propuesta que el usuario ve y descarta.
 - **Sin claves en el código:** se leen de variables de entorno.
 
@@ -159,7 +180,8 @@ Lectura honesta:
 | ¿Y si el LLM se equivoca? | Todo pasa por validación, lo que no entiende queda vacío y el usuario confirma. Si el modelo falla, se usa el intérprete por reglas. |
 | ¿Cómo saben que el LLM aporta? | Se compara contra una línea base sin LLM sobre frases que no se usaron para ajustar (sección 4). |
 | ¿Por qué no un agente que haga todo solo? | Porque un error cambiaría datos reales sin que el usuario lo vea. Proponer y confirmar es la decisión de diseño de la semana 10. |
-| ¿Por qué Haiku para interpretar y Opus para el chat? | Extraer campos de una frase es simple y frecuente: modelo barato. El chat razona con varias herramientas: modelo más capaz. |
+| ¿Por qué un modelo para interpretar y otro para el chat? | Extraer campos de una frase es simple y frecuente: modelo liviano (Flash-Lite o Haiku). El chat razona con varias herramientas: modelo más capaz (Flash u Opus). |
+| ¿Por qué Gemini? | Tiene un plan gratuito con llamadas a herramientas. Como los proveedores son intercambiables, cambiar a Claude u Ollama es una variable de entorno, y la evaluación los compara con las mismas frases. |
 | ¿Funciona sin internet? | Sí, con Ollama local; y sin ningún modelo, con reglas (sin chat). |
 
 ---

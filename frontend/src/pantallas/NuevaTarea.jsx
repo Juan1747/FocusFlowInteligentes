@@ -5,7 +5,7 @@ import { PRIORIDADES, TIPOS, aIsoLocal, desdeIso, fmtDuracion, sumarDias } from 
 
 const DURACIONES_RAPIDAS = [30, 60, 90, 120, 180]
 
-const NOMBRE_FUENTE = { claude: 'Claude', ollama: 'el modelo local', reglas: 'el intérprete básico' }
+const NOMBRE_FUENTE = { claude: 'Claude', gemini: 'Gemini', ollama: 'el modelo local', reglas: 'el intérprete básico' }
 const TEXTO_FALTANTE = {
   nombre: 'el nombre',
   limite: 'la fecha límite',

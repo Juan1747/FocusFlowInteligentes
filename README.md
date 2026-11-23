@@ -202,11 +202,11 @@ Detalle en [`docs/asistente.md`](docs/asistente.md). Dos funciones sobre el mism
 - `POST /asistente`: chat que consulta tareas, tiempo libre, agenda e historial, y **propone** cambios que el usuario confirma.
 - `GET /asistente/estado`: dice qué modelo se está usando.
 
-El LLM entiende el lenguaje; las horas siguen saliendo del planificador y las duraciones del estimador. Funciona con Claude (`ANTHROPIC_API_KEY`; Haiku 5.5 interpreta y Opus 5.5 conversa), con un modelo local gratuito en Ollama (`ollama pull qwen2.5:3b`), o sin modelo (interpretación por reglas, sin chat).
+El LLM entiende el lenguaje; las horas siguen saliendo del planificador y las duraciones del estimador. Funciona con Gemini en el plan gratuito de Google AI Studio (`GEMINI_API_KEY`), con Claude (`ANTHROPIC_API_KEY`; Haiku 5.5 interpreta y Opus 5.5 conversa), con un modelo local gratuito en Ollama (`ollama pull qwen2.5:3b`), o sin modelo (interpretación por reglas, sin chat).
 
 ```bash
-pip install anthropic                # solo si se usa Claude
-python prueba_asistente.py           # 14 pruebas, sin llamar a ningún modelo
+pip install anthropic                # solo si se usa Claude (Gemini y Ollama no necesitan paquetes extra)
+python prueba_asistente.py           # 17 pruebas, sin llamar a ningún modelo
 python evaluacion_interpretar.py     # reglas contra los LLM disponibles
 ```
 
